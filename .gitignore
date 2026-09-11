@@ -1,0 +1,21 @@
+# Built binaries. Releases ship as attachments, not as repository contents.
+#
+# cmd/gui/rsrc.syso is deliberately NOT ignored: it is generated, but the GUI
+# cannot be built without it, and regenerating it needs a separate tool.
+*.exe
+
+# Go test and profiling output
+*.test
+*.out
+/vendor/
+
+# Local backup scratch: a destination folder left inside the checkout
+/_archive/
+/.quickadbackup/
+
+# Editors and OS
+/.vscode/
+/.idea/
+*.swp
+Thumbs.db
+desktop.ini

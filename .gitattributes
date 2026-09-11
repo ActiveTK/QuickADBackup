@@ -1,0 +1,9 @@
+# Keep line endings identical everywhere. Without this, a Windows checkout with
+# core.autocrlf=on rewrites every source file and the whole tree shows as
+# modified before anything has been edited.
+* text=auto eol=lf
+
+# Generated resource object: Windows resource data, not text.
+*.syso binary
+*.exe binary
+*.dll binary
