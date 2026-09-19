@@ -22,6 +22,19 @@ var reserved = map[string]bool{
 	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
 }
 
+// TopLevelReserved are names the backup destination keeps for its own use: the
+// archive folder and the metadata folder both live directly inside it.
+//
+// A device folder of the same name would otherwise be written straight into
+// them - a phone with a .quickadbackup directory would have its contents
+// fighting the index file for the same path. The first component of an encoded
+// path is escaped when it matches, which costs nothing since no phone has these
+// folders, and removes the possibility entirely.
+var TopLevelReserved = map[string]bool{
+	"_archive":       true,
+	".quickadbackup": true,
+}
+
 // Encode converts a slash-separated device-relative path into a
 // backslash-separated Windows-safe relative path.
 func Encode(rel string) string {
@@ -33,7 +46,26 @@ func Encode(rel string) string {
 		}
 		out = append(out, encodeComponent(p))
 	}
+	// NTFS is case-insensitive, so the comparison has to be too: a device
+	// folder called _Archive would land in the archive folder just the same.
+	if len(out) > 0 && TopLevelReserved[strings.ToLower(out[0])] {
+		out[0] = escapeLeadingByte(out[0])
+	}
 	return filepath.Join(out...)
+}
+
+// escapeLeadingByte percent-encodes the first byte of a component, which is
+// enough to make a name distinct from one this tool claims for itself while
+// leaving it recognisable.
+//
+// Every other byte of the component has already been through encodeComponent,
+// so the '%' this introduces cannot be confused with one from the device: those
+// are encoded as %25.
+func escapeLeadingByte(s string) string {
+	if s == "" {
+		return s
+	}
+	return fmt.Sprintf("%%%02X", s[0]) + s[1:]
 }
 
 func encodeComponent(s string) string {
@@ -67,7 +99,7 @@ func encodeComponent(s string) string {
 		stem = s[:i]
 	}
 	if reserved[strings.ToUpper(stem)] {
-		return "%" + fmt.Sprintf("%02X", s[0]) + s[1:]
+		return escapeLeadingByte(s)
 	}
 	return s
 }

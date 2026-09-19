@@ -1,6 +1,12 @@
 package device
 
-import "testing"
+import (
+	"errors"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestParseLine(t *testing.T) {
 	const prefix = "/storage/emulated/0/"
@@ -93,5 +99,51 @@ func TestIsExcluded(t *testing.T) {
 		if got := isExcluded(rel, ex); got != want {
 			t.Errorf("isExcluded(%q) = %v, want %v", rel, got, want)
 		}
+	}
+}
+
+// TestCountMismatchIsRetryable: the two enumerations are separate commands, so
+// a phone writing a thumbnail between them makes them disagree through no fault
+// of the listing. List has to be able to tell that apart from a hard failure to
+// know whether retrying is worth anything.
+func TestCountMismatchIsRetryable(t *testing.T) {
+	err := error(&countMismatchError{Counted: 25761, Listed: 25760})
+
+	var mismatch *countMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatal("errors.As did not recognise the mismatch, so List would never retry")
+	}
+	if mismatch.Counted != 25761 || mismatch.Listed != 25760 {
+		t.Errorf("counts came back as %d/%d", mismatch.Counted, mismatch.Listed)
+	}
+
+	// Anything else must not be retried: a truncated listing that keeps coming
+	// back truncated is the failure this check exists to catch.
+	if errors.As(errors.New("device refused"), &mismatch) {
+		t.Error("an unrelated error was treated as a retryable mismatch")
+	}
+
+	msg := err.Error()
+	for _, want := range []string{"25761", "25760", "refusing", "busy writing"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message does not mention %q:\n%s", want, msg)
+		}
+	}
+	if !strings.Contains(msg, strconv.Itoa(listAttempts)) {
+		t.Errorf("message does not say how many attempts were made:\n%s", msg)
+	}
+}
+
+// TestListAttemptsIsBounded keeps the retry from becoming a way to paper over a
+// listing that is genuinely being truncated.
+func TestListAttemptsIsBounded(t *testing.T) {
+	if listAttempts < 2 {
+		t.Error("a single attempt makes the retry pointless")
+	}
+	if listAttempts > 5 {
+		t.Errorf("listAttempts = %d: too willing to accept a moving target", listAttempts)
+	}
+	if total := time.Duration(listAttempts-1) * listRetryDelay; total > 5*time.Second {
+		t.Errorf("retrying adds up to %s before the run is refused", total)
 	}
 }

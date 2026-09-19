@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,10 +27,11 @@ import (
 // ArchiveDir holds files that disappeared from the phone.
 const ArchiveDir = "_archive"
 
-// partSuffix marks a transfer still in progress. A file only gets its real name
-// once it is complete, so a partial file can never be mistaken for a finished
-// one.
-const partSuffix = ".part"
+// partSuffix marks a transfer still in progress. It is the transfer layer's
+// own constant rather than a second copy of the same string: the sweep below
+// and the name RecvFile writes have to agree, and two literals in two packages
+// do not stay agreed.
+const partSuffix = adbproto.PartSuffix
 
 // DefaultWorkers is how many sync streams run at once.
 //
@@ -371,17 +373,17 @@ func archiveMissing(opts Options, idx *index.Index, present map[string]bool, st 
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 			return err
 		}
-		if err := os.Rename(src, dst); err != nil {
-			// A same-named file archived earlier today is not a reason to stop.
-			// Forget it either way: leaving it in the index made every later run
-			// retry the same impossible rename forever.
-			if !errors.Is(err, os.ErrExist) {
-				return fmt.Errorf("archiving %s: %w", rel, err)
-			}
+		dst, err := freeName(dst)
+		if err != nil {
+			// Nowhere to put it. Leave the file where it is and forget it:
+			// keeping it in the index made every later run retry the same
+			// impossible move forever.
 			idx.Delete(rel)
-			st.Skipped = append(st.Skipped,
-				fmt.Sprintf("already archived today, left in place: %s", rel))
+			st.Skipped = append(st.Skipped, fmt.Sprintf("could not be archived, left in place: %s", rel))
 			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			return fmt.Errorf("archiving %s: %w", rel, err)
 		}
 		idx.Delete(rel)
 		moved = append(moved, rel)
@@ -391,6 +393,37 @@ func archiveMissing(opts Options, idx *index.Index, present map[string]bool, st 
 		"archived %d files removed from the phone into %s/%s", st.Archived, ArchiveDir, stamp)
 	pruneArchivedDirs(opts.Dest, moved)
 	return nil
+}
+
+// freeName returns path, or the first " (n)" variant of it that does not exist.
+//
+// The archive folder is named for the day, so the same relative path can be
+// archived into it twice: a file deleted from the phone, restored, and deleted
+// again all in one day. os.Rename on Windows replaces its destination without
+// complaint, and the second move would therefore destroy the first copy - in
+// the one place this tool promises nothing is ever lost. Renaming onto a name
+// nothing holds is the only way to keep that promise.
+func freeName(path string) (string, error) {
+	if !taken(path) {
+		return path, nil
+	}
+	ext := filepath.Ext(path)
+	stem := strings.TrimSuffix(path, ext)
+	for n := 2; n < 1000; n++ {
+		p := fmt.Sprintf("%s (%d)%s", stem, n, ext)
+		if !taken(p) {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("%s and 998 variants of it are all taken", path)
+}
+
+// taken reports whether anything at all occupies path. An error other than
+// "not there" counts as taken: a name this process cannot even inspect is not
+// one it should rename a file onto.
+func taken(path string) bool {
+	_, err := os.Lstat(path)
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // pruneArchivedDirs removes directories left empty by the archiving above.

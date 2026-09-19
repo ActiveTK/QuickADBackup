@@ -544,6 +544,7 @@ func (a *app) runSync(dryRun bool) {
 		return
 	}
 	defer a.inflight.Done()
+	defer a.dropIfDead(c)
 	out := outcomeFailed
 	finish := a.finisher()
 	defer func() { finish(out) }()
@@ -568,7 +569,6 @@ func (a *app) runSync(dryRun bool) {
 			a.log("エラー: %v", err)
 			defer a.msgBox("エラー", err.Error(), walk.MsgBoxIconError)
 		}
-		a.markConnectionIfLost(err)
 		if ctx.Err() != nil {
 			out = outcomeCancelled
 		}
@@ -593,7 +593,12 @@ func (a *app) runSync(dryRun bool) {
 	// the progress area on 完了 with the shortfall buried in the log is the same
 	// mistake the verify side used to make: the one number the user reads says
 	// the run was clean while it was not.
-	if n := len(st.Failed); n > 0 && !dryRun {
+	//
+	// A run the user stopped is not that, though. Cancelling tears the
+	// connection down after a grace period, so whatever was mid-transfer lands
+	// in Failed - and answering 中止 with a warning that files could not be read
+	// blames the device for doing what it was told.
+	if n := len(st.Failed); n > 0 && !dryRun && ctx.Err() == nil {
 		for i, f := range st.Failed {
 			if i == 10 {
 				a.log("  ... 他 %d件", n-10)
@@ -622,6 +627,7 @@ func (a *app) runVerify() {
 		return
 	}
 	defer a.inflight.Done()
+	defer a.dropIfDead(c)
 	out := outcomeFailed
 	finish := a.finisher()
 	defer func() { finish(out) }()
@@ -640,7 +646,6 @@ func (a *app) runVerify() {
 		} else {
 			a.log("エラー: %v", err)
 		}
-		a.markConnectionIfLost(err)
 		if ctx.Err() != nil {
 			out = outcomeCancelled
 		}
@@ -690,18 +695,31 @@ func (a *app) runVerify() {
 		fmt.Sprintf("%d件すべて一致しました。", res.Matched), walk.MsgBoxIconInformation)
 }
 
-// markConnectionIfLost drops a connection the device has torn down, so the next
-// operation does not fail on a dead handle.
-func (a *app) markConnectionIfLost(err error) {
-	if err == nil || !strings.Contains(err.Error(), "usb") {
+// dropIfDead releases a connection that has already been torn down, so the next
+// operation does not start on a handle that can never carry anything again.
+//
+// The connection is asked directly instead of the error being pattern matched.
+// The substring test this replaces looked for a lowercase "usb", which the two
+// errors that matter most do not contain: Abort reports "the USB connection was
+// aborted" and a cancelled run reports context.Canceled while the abort that
+// unblocked it has already killed the link. Either one left the window claiming
+// to be connected, with every button enabled, until the user thought to press
+// 再接続 - which is exactly the state the stall handling exists to avoid.
+func (a *app) dropIfDead(c *adbproto.Conn) {
+	if c == nil || c.Alive() {
 		return
 	}
 	a.mu.Lock()
-	if a.conn != nil {
-		a.conn.Close()
+	mine := a.conn == c
+	if mine {
 		a.conn = nil
 	}
 	a.mu.Unlock()
+	if !mine {
+		// Something else already replaced it; closing it is that owner's job.
+		return
+	}
+	c.Close()
 	a.log("USB接続が失われました。「再接続」を押してください。")
 	a.ui(func() {
 		a.deviceLabel.SetText("未接続")

@@ -5,9 +5,11 @@ package device
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"quickadbackup/internal/adbproto"
 )
@@ -80,6 +82,32 @@ func SupportsPrintf(ctx context.Context, c *adbproto.Conn, root string) bool {
 		!strings.Contains(s, "bad flag")
 }
 
+// listAttempts is how many times a listing whose cross-check disagreed is
+// retried before the run is refused.
+//
+// The two enumerations are separate commands, so a phone that writes a file
+// between them - a thumbnail, a log line, a photo - makes them disagree through
+// no fault of the listing. That is a normal thing for a phone to do and a poor
+// reason to refuse a backup, but an unbounded retry would paper over the
+// truncation this check exists to catch. A handful of tries separates a busy
+// device from a broken one.
+const listAttempts = 3
+
+// listRetryDelay gives whatever was writing a moment to finish.
+const listRetryDelay = 750 * time.Millisecond
+
+// countMismatchError reports that the listing and the count of what should be
+// in it disagreed.
+type countMismatchError struct{ Counted, Listed int }
+
+func (e *countMismatchError) Error() string {
+	return fmt.Sprintf("listing is incomplete: find reported %d files but only %d lines came back, "+
+		"in %d attempts; refusing to treat this as a full picture of the device.\n"+
+		"If the phone is busy writing files - a camera, a download, a syncing app - let it settle "+
+		"and run again. A difference that persists means the listing itself is being truncated",
+		e.Counted, e.Listed, listAttempts)
+}
+
 // List enumerates every regular file under root in a single device command.
 //
 // This runs a shell command rather than walking the sync service's LIST,
@@ -105,6 +133,26 @@ func List(ctx context.Context, c *adbproto.Conn, root string, excludes []string)
 			"a zero exit status, which would silently produce an incomplete backup")
 	}
 
+	var mismatch *countMismatchError
+	for attempt := 1; ; attempt++ {
+		l, err := listOnce(ctx, c, root, excludes)
+		if err == nil {
+			return l, nil
+		}
+		if !errors.As(err, &mismatch) || attempt == listAttempts {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(listRetryDelay):
+		}
+	}
+}
+
+// listOnce is one pass of List: enumerate, then check the result against a
+// count taken the same way but by a command that cannot be truncated.
+func listOnce(ctx context.Context, c *adbproto.Conn, root string, excludes []string) (*Listing, error) {
 	cmd := "find " + adbproto.ShellQuote(root) + ` -type f -printf '%s|%T@|%p\n' 2>/dev/null`
 	res, err := c.ExecStatus(cmd)
 	if err != nil {
@@ -155,8 +203,7 @@ func List(ctx context.Context, c *adbproto.Conn, root string, excludes []string)
 			root, err)
 	}
 	if count != seen {
-		return nil, fmt.Errorf("listing is incomplete: find reported %d files but only %d lines "+
-			"came back; refusing to treat this as a full picture of the device", count, seen)
+		return nil, &countMismatchError{Counted: count, Listed: seen}
 	}
 
 	// A non-zero exit from find means it could not read part of the tree. Naming

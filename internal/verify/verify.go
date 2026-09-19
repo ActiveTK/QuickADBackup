@@ -30,6 +30,29 @@ import (
 // the command travels as a protocol payload rather than a process argument.
 const batchBudget = 60000
 
+// commandOverhead reserves room for the exec: prefix and the exit-status
+// wrapper adbproto puts around every command.
+const commandOverhead = 512
+
+// batchLimit is batchBudget capped by what this particular device will accept
+// in one message.
+//
+// The command is the payload of a single OPEN, and a device that negotiated a
+// small maximum payload - adbd did so until protocol v2 - answers an oversized
+// one by closing the connection. A verify that kills the link on its first
+// batch is indistinguishable from a broken cable, so the batch is sized to fit
+// instead.
+func batchLimit(c *adbproto.Conn) int {
+	limit := int(c.MaxData) - commandOverhead
+	if limit > batchBudget {
+		limit = batchBudget
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit
+}
+
 // sha1HexLen is the width of the digest sha1sum prints before the path.
 const sha1HexLen = 40
 
@@ -126,6 +149,7 @@ func Run(ctx context.Context, c *adbproto.Conn, opts Options) (*Result, error) {
 		}
 	}
 
+	limit := batchLimit(c)
 	for i := 0; i < len(toHash); {
 		if err := ctx.Err(); err != nil {
 			return res, err
@@ -134,8 +158,16 @@ func Run(ctx context.Context, c *adbproto.Conn, opts Options) (*Result, error) {
 		length := len("sha1sum")
 		for ; i < len(toHash); i++ {
 			q := len(adbproto.ShellQuote(opts.Root+"/"+toHash[i].Rel)) + 1
-			if length+q > batchBudget && len(batch) > 0 {
-				break
+			if length+q > limit {
+				if len(batch) > 0 {
+					break
+				}
+				// One path that does not fit on its own. There is no command
+				// this device could be asked to run for it, so say that rather
+				// than send a message it would answer by hanging up.
+				res.Unreadable = append(res.Unreadable, toHash[i].Rel)
+				res.Checked++
+				continue
 			}
 			batch = append(batch, toHash[i])
 			length += q

@@ -9,7 +9,11 @@ metadata first, works out what actually changed, and fetches only that.
 
 **The device is strictly read-only.** Nothing is created, modified or deleted on
 the phone. Files that disappear from the phone are moved into a dated archive
-folder on the PC rather than deleted.
+folder on the PC rather than deleted, and never on top of something already
+there: a file deleted, restored and deleted again in one day is archived twice,
+as `photo.jpg` and `photo (2).jpg`. `os.Rename` on Windows replaces its
+destination without a word, so "move, don't delete" is only true if the
+destination is known to be free.
 
 ## Usage
 
@@ -151,6 +155,13 @@ and returns a partial listing with a zero exit status. It returned 3,064 of
 25,761 files. Every listing is cross-checked against a plain `find | wc -l` and
 the run aborts if the counts disagree.
 
+The two enumerations are separate commands, though, so a phone that writes a
+file between them — a thumbnail, a log line, a photo — makes them disagree
+through no fault of the listing. That is a normal thing for a phone to do and a
+poor reason to refuse a backup, so the scan is retried a few times before the
+run is refused. A difference that survives that is the truncation the check is
+there to catch.
+
 **The `shell` service corrupts binary data.** It allocates a pseudo-terminal
 that expands LF to CRLF: a 4,869,012-byte JPEG came back as 4,876,491 bytes with
 a different SHA-1. All commands go through the `exec` service instead, which
@@ -160,6 +171,21 @@ allocates no terminal.
 path uses `RECV`, which returns an explicit `FAIL` for the one file it could not
 read instead of quietly omitting it from a batch.
 
+**A command is a protocol message, not a process argument.** `verify` builds one
+`sha1sum` invocation out of as many paths as will fit, and the whole thing
+travels as the payload of a single `OPEN`. A device that negotiated a small
+maximum payload — adbd did until protocol v2 — answers an oversized message by
+closing the connection, which looks exactly like a broken cable. Batches are
+sized against what the device actually agreed to, and `Open` refuses anything
+larger rather than sending it.
+
+**Lengths that come off the wire are not to be trusted.** The sync protocol
+announces the size of the next filename, failure message or data chunk, and the
+host then allocates or reads that much. A stream that has lost its framing turns
+four stray bytes into a demand for gigabytes, or into a data chunk long enough
+to pour the rest of the conversation into the file being saved. Each is bounded
+against what the protocol really uses.
+
 **A reconnect reads the previous session's tail.** Data left in the USB pipes
 survives a close, so the next connection's first header lands mid-stream. Both
 pipes are reset and flushed on open, and every header's magic word is checked.
@@ -168,7 +194,9 @@ pipes are reset and flushed on open, and every header's magic word is checked.
 `: ? * " < > |`, names ending in a dot or space, and reserved names like `CON`
 are percent-encoded. Files whose names differ only by case cannot coexist on
 NTFS, so those are skipped and reported rather than silently overwriting each
-other.
+other. A top-level device folder called `_archive` or `.quickadbackup` is
+escaped too: those are the destination's own, and a phone folder of that name
+would otherwise be written into the archive or over the index.
 
 **`sha1sum` may separate the digest from the path with `*`, not a space.** It
 marks binary mode, and it is not whitespace. Trimming the separator as if it were
@@ -252,6 +280,11 @@ exists because breaking it produced a visible bug:
   with no window on screen.
 - Closing the device is bounded by a timeout, so a reader parked on a USB
   transfer cannot keep a windowless process alive.
+- **A dead connection is detected by asking it, not by reading the error.** A
+  cancelled run reports `context.Canceled` while the abort that unblocked it has
+  already killed the link; an aborted one reports `ErrAborted`. Matching on the
+  error text missed both, and left the window claiming to be connected with
+  every button enabled — the exact state the stall handling exists to avoid.
 
 ### Phases with nothing to count
 
@@ -270,8 +303,16 @@ The index is written every few seconds, so an interrupted run resumes from where
 it stopped instead of starting over. Files are written to a `.part` file, flushed
 to disk and renamed, so a partial file is never mistaken for a complete one and a
 power loss cannot leave a full-length file of zeroes that the index believes is
-done. The next run sweeps away any `.part` left behind, except one whose name the
-device actually has.
+done. The in-progress name carries the process id and a counter, because a phone
+holding both `clip` and `clip.part` would otherwise have one worker's scratch
+file and another worker's finished name be the same path — and eight workers run
+at once. The next run sweeps away any `.part` left behind, except one whose name
+the device actually has.
+
+Cancelling is not failing. A stopped run tears the connection down after a grace
+period, so whatever was mid-transfer is reported as not retrieved; the GUI does
+not turn that into a warning that the device could not be read, because the
+device did exactly what it was told.
 
 The first Ctrl+C cancels the run so it can unwind and still print its summary; a
 second one quits immediately. Cancelling works even when the phone has stopped

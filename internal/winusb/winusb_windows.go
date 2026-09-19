@@ -13,6 +13,7 @@ package winusb
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -363,6 +364,14 @@ func (d *Device) transfer(out bool, p []byte) (int, error) {
 		proc, pipe, o = procWritePipe, d.outPipe, d.writeOv
 	}
 	var transferred uint32
+	// The driver keeps writing into p and transferred for as long as the
+	// transfer is pending, which outlasts the call that started it. Nothing
+	// below reads either through a Go reference - they reach the driver as
+	// uintptr - so without this the collector is entitled to reclaim them while
+	// the device is still filling them in.
+	defer runtime.KeepAlive(p)
+	defer runtime.KeepAlive(&transferred)
+
 	procResetEvent.Call(uintptr(o.event))
 	r, _, e := proc.Call(d.iface, uintptr(pipe),
 		uintptr(unsafe.Pointer(&p[0])), uintptr(len(p)),

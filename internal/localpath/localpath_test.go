@@ -2,6 +2,7 @@ package localpath
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +72,44 @@ func TestFindCollisions(t *testing.T) {
 func TestFindCollisionsNone(t *testing.T) {
 	if got := FindCollisions([]string{"a/b.jpg", "a/c.jpg", "d/b.jpg"}); len(got) != 0 {
 		t.Errorf("unexpected collisions: %+v", got)
+	}
+}
+
+// TestEncodeEscapesTheDestinationsOwnNames keeps a device folder from being
+// written into the backup's archive or over its index. Nothing in the encoding
+// of any other name can produce these, because a literal '%' becomes %25.
+func TestEncodeEscapesTheDestinationsOwnNames(t *testing.T) {
+	cases := []struct{ rel, want string }{
+		{"_archive/x.jpg", filepath.Join("%5Farchive", "x.jpg")},
+		{"_Archive/x.jpg", filepath.Join("%5FArchive", "x.jpg")},
+		{".quickadbackup/index.json", filepath.Join("%2Equickadbackup", "index.json")},
+		// Only the top level is claimed; deeper ones are ordinary names.
+		{"DCIM/_archive/x.jpg", filepath.Join("DCIM", "_archive", "x.jpg")},
+		// A name that merely starts the same is left alone.
+		{"_archived/x.jpg", filepath.Join("_archived", "x.jpg")},
+	}
+	for _, c := range cases {
+		if got := Encode(c.rel); got != c.want {
+			t.Errorf("Encode(%q) = %q, want %q", c.rel, got, c.want)
+		}
+	}
+}
+
+// TestEncodeReservedNamesStayDistinct: the escape must not make two device
+// paths collide that did not collide already, which is the whole reason
+// encoding exists. "_Archive" is left out on purpose - it collides with
+// "_archive" on NTFS before any encoding happens, and FindCollisions is what
+// reports that.
+func TestEncodeReservedNamesStayDistinct(t *testing.T) {
+	seen := map[string]string{}
+	for _, rel := range []string{
+		"_archive/x", "%5Farchive/x", "_archived/x",
+		".quickadbackup/x", "%2Equickadbackup/x",
+	} {
+		got := strings.ToLower(Encode(rel))
+		if prev, dup := seen[got]; dup {
+			t.Errorf("Encode(%q) and Encode(%q) both give %q", prev, rel, got)
+		}
+		seen[got] = rel
 	}
 }

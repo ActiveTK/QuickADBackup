@@ -423,7 +423,17 @@ func (c *Conn) fail(err error) {
 }
 
 // Open starts a stream for a service such as "sync:" or "shell:ls".
+//
+// The service name travels as the payload of a single OPEN message, which send
+// does not split, so it has to fit in what the device agreed to accept. That is
+// not a theoretical bound: a command built out of file paths grows with the
+// batch it describes, and adbd answers an oversized message by dropping the
+// whole connection. Refusing here turns that into something a caller can act on.
 func (c *Conn) Open(service string) (*Stream, error) {
+	if max := int(c.MaxData); len(service)+1 > max {
+		return nil, fmt.Errorf("%w: the request is %d bytes and the device accepts at most %d per message",
+			ErrRequestTooLong, len(service)+1, max)
+	}
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
@@ -458,8 +468,28 @@ func (c *Conn) removeStream(id uint32) {
 	c.mu.Unlock()
 }
 
+// ErrRequestTooLong reports a service request larger than one protocol message.
+// Callers that build a command out of a variable number of paths use it to size
+// their batches; see Conn.MaxData.
+var ErrRequestTooLong = errors.New("the service request does not fit in one protocol message")
+
 // ErrAborted reports that the connection was torn down by Abort.
 var ErrAborted = errors.New("the USB connection was aborted")
+
+// Alive reports whether the connection can still carry traffic.
+//
+// It is the honest answer to "did that operation leave the device usable", which
+// the returned error is not: a cancelled run reports context.Canceled while the
+// abort that unblocked it has already killed the connection underneath, and an
+// aborted one reports ErrAborted. Matching on either misses the other.
+func (c *Conn) Alive() bool {
+	select {
+	case <-c.done:
+		return false
+	default:
+		return true
+	}
+}
 
 // Abort tears the connection down without waiting for the reader to return.
 //

@@ -3,19 +3,34 @@
 # cmd/gui/rsrc.syso is deliberately NOT ignored: it is generated, but the GUI
 # cannot be built without it, and regenerating it needs a separate tool.
 *.exe
+/dist/
+/build/
 
-# Go test and profiling output
+# Go test, coverage and profiling output. *.out covers coverage.out as well as
+# the default `go test -o` name.
 *.test
 *.out
+*.prof
+*.pprof
 /vendor/
 
-# Local backup scratch: a destination folder left inside the checkout
+# A local go.work points the build at checkouts that exist on one machine only,
+# so committing it breaks the build for everyone else.
+go.work
+go.work.sum
+
+# Local backup scratch: a destination folder left inside the checkout, and the
+# in-progress transfers that live beside the files they will become. See
+# adbproto.PartSuffix - a run interrupted mid-transfer leaves these behind.
 /_archive/
 /.quickadbackup/
+*.part
 
 # Editors and OS
 /.vscode/
 /.idea/
 *.swp
+*~
+.DS_Store
 Thumbs.db
 desktop.ini

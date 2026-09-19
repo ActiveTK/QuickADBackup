@@ -8,8 +8,36 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+// maxSyncBlob bounds anything the device asks the host to allocate from a
+// length the device itself supplied.
+//
+// A desynchronised stream turns a stray four bytes into an allocation request,
+// and without a ceiling a corrupt length asks for up to 4 GiB. It is generous
+// next to what the protocol actually uses: adbd sends file data in 64 KiB
+// chunks and failure messages in a sentence or two.
+const maxSyncBlob = 1 << 20
+
+// maxSyncName bounds a single directory entry's name, which Linux caps at 255
+// bytes to begin with.
+const maxSyncName = 4096
+
+// checkBlobLen rejects a length that came from the device and cannot be real.
+//
+// Every one of these lengths is read straight off the wire and then used to
+// size a read or an allocation, so a stream that has lost its framing turns
+// four stray bytes into a demand for gigabytes - or, worse, into a length that
+// writes whatever follows it into the file being saved.
+func checkBlobLen(what string, n, max uint32) error {
+	if n > max {
+		return fmt.Errorf("device announced an implausible %d-byte %s, "+
+			"so the sync stream is no longer in step with it", n, what)
+	}
+	return nil
+}
 
 // Sync service request and response ids, as documented in SYNC.TXT.
 var (
@@ -76,6 +104,9 @@ func (sc *SyncConn) readU32() (uint32, error) {
 func (sc *SyncConn) failMessage() error {
 	n, err := sc.readU32()
 	if err != nil {
+		return err
+	}
+	if err := checkBlobLen("failure message", n, maxSyncBlob); err != nil {
 		return err
 	}
 	msg := make([]byte, n)
@@ -165,6 +196,9 @@ func (sc *SyncConn) List(path string) ([]FileInfo, error) {
 			}
 			fi := parseStatV2(buf)
 			nameLen := binary.LittleEndian.Uint32(buf[statV2Size:])
+			if err := checkBlobLen("filename", nameLen, maxSyncName); err != nil {
+				return nil, err
+			}
 			name := make([]byte, nameLen)
 			if err := sc.s.ReadFull(name); err != nil {
 				return nil, err
@@ -197,6 +231,13 @@ func (sc *SyncConn) Recv(path string, w io.Writer) (int64, error) {
 			if err != nil {
 				return total, err
 			}
+			// A length this large is not a big chunk, it is a stream that has
+			// lost its framing. Continuing would write whatever follows into
+			// the file being saved, which for a backup tool is the worst
+			// possible way to fail.
+			if err := checkBlobLen("data chunk for "+path, n, maxSyncBlob); err != nil {
+				return total, err
+			}
 			if _, err := io.CopyN(w, sc.s, int64(n)); err != nil {
 				return total, err
 			}
@@ -215,6 +256,25 @@ func (sc *SyncConn) Recv(path string, w io.Writer) (int64, error) {
 	}
 }
 
+// PartSuffix marks a transfer still in progress. A file only gets its real name
+// once it is complete, so a partial file can never be mistaken for a finished
+// one, and a sweep for leftovers has one suffix to look for.
+const PartSuffix = ".part"
+
+// partSeq distinguishes concurrent transfers from one another.
+var partSeq atomic.Uint64
+
+// partPath names the in-progress file for local.
+//
+// The name cannot be local+PartSuffix on its own: a phone holding both "clip"
+// and "clip.part" would have one worker's scratch file and another worker's
+// finished name be the same path, and eight workers run at once. Nothing about
+// a device filename can collide with the middle section, and O_EXCL below turns
+// even an invented collision into a clean error rather than a silent overwrite.
+func partPath(local string) string {
+	return fmt.Sprintf("%s.qab%d-%d%s", local, os.Getpid(), partSeq.Add(1), PartSuffix)
+}
+
 // RecvFile writes one device file to a local path, preserving its mtime, and
 // reports how many bytes actually arrived.
 //
@@ -222,8 +282,8 @@ func (sc *SyncConn) Recv(path string, w io.Writer) (int64, error) {
 // listing claimed, because the two disagree whenever a file is still being
 // written on the phone; the index has to record what is really on disk here.
 func (sc *SyncConn) RecvFile(remote, local string, mtime time.Time) (int64, error) {
-	tmp := local + ".part"
-	f, err := os.Create(tmp)
+	tmp := partPath(local)
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
 		return 0, err
 	}
