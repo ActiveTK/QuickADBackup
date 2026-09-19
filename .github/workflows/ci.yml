@@ -11,9 +11,9 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -38,7 +38,7 @@ jobs:
       - name: build quickadbackup-gui.exe
         run: go build -trimpath -ldflags "-s -w -H=windowsgui" -o quickadbackup-gui.exe ./cmd/gui
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: quickadbackup-windows-amd64
           path: |
