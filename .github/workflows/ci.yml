@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            $unformatted
+            exit 1
+          }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: build quickadbackup.exe
+        run: go build -trimpath -ldflags "-s -w" -o quickadbackup.exe .
+
+      - name: build quickadbackup-gui.exe
+        run: go build -trimpath -ldflags "-s -w -H=windowsgui" -o quickadbackup-gui.exe ./cmd/gui
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quickadbackup-windows-amd64
+          path: |
+            quickadbackup.exe
+            quickadbackup-gui.exe
+          retention-days: 14
