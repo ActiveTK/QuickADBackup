@@ -4,9 +4,9 @@ Android端末の共有ストレージをPCへ差分バックアップするWindo
 
 ## 使い方
 
-`quickadbackup-gui.exe` は、保存先を選んで実行するウィンドウです。
+`quickadbackup-gui.exe` を起動すると、保存先を選んで実行するウィンドウが開きます。
 
-`quickadbackup.exe` は、スクリプトや定期実行向けのCLIです。
+`quickadbackup.exe` はコマンドラインから実行します。スクリプトや定期実行向けです。
 
 ```
 quickadbackup probe                    # 端末の対応状況を確認
