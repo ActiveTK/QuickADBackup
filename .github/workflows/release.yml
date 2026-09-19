@@ -36,9 +36,7 @@ jobs:
           Copy-Item README.md, LICENSE dist\
           $zip = "QuickADBackup-$env:GITHUB_REF_NAME-windows-amd64.zip"
           Compress-Archive -Path dist\* -DestinationPath $zip -Force
-          Get-FileHash -Algorithm SHA256 $zip, dist\quickadbackup.exe, dist\quickadbackup-gui.exe |
-            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLower(), (Split-Path $_.Path -Leaf) } |
-            Set-Content -Encoding ascii SHA256SUMS.txt
+          (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower() | Set-Content -Encoding ascii SHA256
           "ZIP=$zip" | Add-Content $env:GITHUB_ENV
 
       - name: create release
@@ -49,4 +47,4 @@ jobs:
             --title $env:GITHUB_REF_NAME `
             --generate-notes `
             --verify-tag `
-            $env:ZIP dist\quickadbackup.exe dist\quickadbackup-gui.exe SHA256SUMS.txt
+            $env:ZIP SHA256
