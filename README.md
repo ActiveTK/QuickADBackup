@@ -1,321 +1,110 @@
 # QuickADBackup
 
-Incremental backup of an Android device's shared storage to a PC, speaking the
-ADB protocol directly over USB. **No adb.exe, no adb server, no cgo.**
+Android端末の共有ストレージをPCへ**差分**バックアップするWindows用ツール。ADB
+プロトコルをUSB上で直接話すので、**adb.exeもadbサーバーもcgoも要らない**。
 
-`adb pull -a /sdcard` can only ever do a full backup: it has nothing to compare
-against, so every run re-transfers everything. This tool reads the device's file
-metadata first, works out what actually changed, and fetches only that.
+`adb pull -a /sdcard` は毎回すべてを転送し直す。比較する相手を持っていないので
+それ以外にやりようがない。このツールは先に端末側のメタデータを読んで何が変わった
+かを確かめ、変わった分だけ取ってくる。
 
-**The device is strictly read-only.** Nothing is created, modified or deleted on
-the phone. Files that disappear from the phone are moved into a dated archive
-folder on the PC rather than deleted, and never on top of something already
-there: a file deleted, restored and deleted again in one day is archived twice,
-as `photo.jpg` and `photo (2).jpg`. `os.Rename` on Windows replaces its
-destination without a word, so "move, don't delete" is only true if the
-destination is known to be free.
+**端末は読み取り専用。** 端末上には何も作らず、書き換えず、消さない。端末から消え
+たファイルはPC側の日付付きフォルダへ退避するだけで、どこでも削除しない。
 
-## Usage
+## 速度
 
-There are two front ends over one engine.
+Pixel 7 / Android 16 / USB 3、`Pictures` 7,204ファイル・1.1GiB:
 
-**`quickadbackup-gui.exe`** is a native Windows window: pick a destination,
-watch a progress bar and transfer rate, cancel mid-run. It remembers the
-destination between sessions and mirrors its log to
-`%APPDATA%\QuickADBackup\gui.log`, so a completed backup leaves a record.
-
-The GUI links the engine packages directly rather than driving the CLI. That is
-not a style preference — the USB interface can be claimed by exactly one
-process, so a GUI that spawned the CLI would be fighting its own child for the
-device. Linking in also lets one connection stay open for the life of the
-window, which means the GUI pays the interface-reappearance wait once at
-startup instead of on every operation.
-
-**`quickadbackup.exe`** is the command line, for scripting and scheduled runs:
-
-```
-quickadbackup probe                          # check what the device supports
-quickadbackup sync -dest D:\Backup           # copy new and changed files
-quickadbackup verify -dest D:\Backup         # re-hash the backup against the phone
-```
-
-Only one of the two can hold the device at a time.
-
-| Flag | Meaning |
-| --- | --- |
-| `-dest DIR` | destination on this PC (required) |
-| `-root DIR` | device folder to back up (default `/storage/emulated/0`) |
-| `-exclude LIST` | comma-separated paths to skip, relative to root |
-| `-workers N` | parallel transfer streams (default 8) |
-| `-dry-run` | report the plan, copy nothing |
-| `-sample N` | `verify` only: files to check at random; `0` checks every file |
-| `-device FRAG` | which device to use, when more than one is connected |
-
-Running under Git Bash or MSYS, set `MSYS_NO_PATHCONV=1` first, or the shell
-rewrites `/storage/...` into a Windows path before the tool ever sees it.
-
-`sync` and `verify` exit non-zero whenever the run did not establish what it set
-out to establish, not only when it crashed. A backup that could not read some of
-the files it wanted, or a verify that could not hash some of them on the device,
-is a failure: a scheduled run only ever looks at the exit status, and the one
-number it reads must not say "clean" about files nobody compared.
-
-### The one real cost of not using adb
-
-The USB interface can be claimed by exactly one process. **The adb server must
-not be running**, and Android Studio or scrcpy cannot be connected at the same
-time.
-
-There is a second consequence. When a host disconnects, `adbd` on the phone
-tears its USB function down and brings it back up, so the interface disappears
-from Windows entirely for about 3.6 seconds. Running this tool twice in quick
-succession waits that out; it prints a line when it does.
-
-## How it works
-
-Three layers, each in its own package:
-
-| Layer | Package | What it does |
+| | adb経由 | このツール |
 | --- | --- | --- |
-| USB | `internal/winusb` | Claims the ADB interface through Microsoft's WinUSB driver via SetupAPI, and moves bytes over the bulk endpoints |
-| Protocol | `internal/adbproto` | CNXN/AUTH/OPEN/OKAY/WRTE/CLSE framing, RSA authentication, stream multiplexing |
-| Sync | `internal/adbproto/sync.go` | The file service: `STAT_V2`, `LIST_V2`, `RECV` |
+| 初回バックアップ | 49.3秒 | **18.0秒** |
+| 2回目（変更なし） | 1.8秒 | 1.8秒 |
+| 転送速度 | 15.3MiB/s | **101.7MiB/s** |
 
-None of this is reverse engineered. It is documented in AOSP under
-`packages/modules/adb`: `protocol.txt` for the framing, `SERVICES.TXT` for the
-service names, `SYNC.TXT` for file transfer.
+並列ストリーム数（`-workers`）を増やすと 1本で117ファイル/秒、8本で817ファイル/秒。
+既定は8本。
 
-Authentication reuses `~/.android/adbkey`, the same key adb uses, so a device
-that has already authorized this computer stays authorized. If that key does not
-exist - a PC that has never run adb - one is generated, in adb's own formats:
-PKCS#8 PEM for the private half, and Android's 524-byte little-endian
-`RSAPublicKey` struct, base64-encoded, for `adbkey.pub`. A key written here is
-therefore interchangeable with adb's own. (The encoding is checked against
-reality: the test suite re-derives the public key from a private key adb itself
-wrote and compares the result byte for byte.)
+## 使い方
 
-Setting `ANDROID_VENDOR_KEYS` points the lookup elsewhere and disables
-generation, since a vendor key directory is not this tool's to write into.
+**`quickadbackup-gui.exe`** — 保存先を選んで実行するだけのウィンドウ。進捗と転送
+速度が出て、途中で止められる。保存先は次回も覚えていて、ログは
+`%APPDATA%\QuickADBackup\gui.log` にも残る。
 
-The first authorization completes in one run. The device sends a token, the host
-signs it, the device rejects the unknown key and sends another, the host offers
-the public half, and the phone raises "Allow USB debugging?". The tool then keeps
-signing tokens until the connection completes or a minute passes - it no longer
-gives up at the prompt and asks you to run it again.
-
-**Scanning** runs one shell command rather than walking the sync service:
+**`quickadbackup.exe`** — スクリプトや定期実行向けのCLI。
 
 ```
-find /storage/emulated/0 -type f -printf '%s|%T@|%p\n'
+quickadbackup probe                    # 端末が何に対応しているか見る
+quickadbackup sync -dest D:\Backup     # 新規・変更分をコピー
+quickadbackup verify -dest D:\Backup   # バックアップを端末と照合し直す
 ```
 
-This is deliberate. The sync service's own `LIST` costs one round trip per
-directory: across 7,959 directories that measured 29.1 s, against 2.9 s for a
-single `find`. Purity would have made it ten times slower.
-
-**Transfer** uses the sync service's `RECV` on a pool of parallel streams. There
-is no size threshold, no `tar`, and no batching by command length, because none
-of those constraints exist once the shell is out of the transfer path.
-
-## Measurements
-
-Pixel 7, Android 16, USB 3.
-
-| | adb-based build | This build |
-| --- | --- | --- |
-| First backup of `Pictures` (7,204 files / 1.1 GiB) | 49.3 s | **18.0 s** |
-| Same backup, nothing changed | 1.8 s | 1.8 s |
-| Same cold workload, transfer only | 15.3 MiB/s | **101.7 MiB/s** |
-| Full verify of 7,204 files | — | 38.8 s, all matched |
-
-Transfer scaling with `-workers`, measured on cold files:
-
-| Streams | Throughput |
+| フラグ | 意味 |
 | --- | --- |
-| 1 | 117 files/s |
-| 4 | 489 files/s |
-| 8 | 817 files/s, 75 MiB/s |
+| `-dest DIR` | PC側の保存先（必須） |
+| `-root DIR` | 端末側の対象フォルダ（既定 `/storage/emulated/0`） |
+| `-exclude LIST` | root からの相対パスをカンマ区切りで除外 |
+| `-workers N` | 並列転送ストリーム数（既定 8） |
+| `-dry-run` | 何をするかだけ表示して転送しない |
+| `-sample N` | `verify` 用。無作為に N 件だけ照合（`0` で全件） |
+| `-device FRAG` | 複数台つながっているときの選択 |
 
-Throughput varies with what the phone is doing. One 285 MiB run took 4m55s that
-normally takes 27 s, apparently because the device had gone into a doze state.
+`Android/data` と `Android/obb` は既定で除外する。adbのシェルユーザーからは読めず、
+中身はアプリのキャッシュなので（テスト端末で12,960ファイル）。
 
-## Device quirks this works around
+Git Bash や MSYS では先に `MSYS_NO_PATHCONV=1` を設定すること。しないとシェルが
+`/storage/...` をWindowsパスに書き換えてしまう。
 
-These were all found by testing against a real device, and each one silently
-produces a wrong result rather than an error.
+中断した実行は途中から再開する。Ctrl+C は1回目が中止（集計を表示して終わる）、
+2回目が即時終了。
 
-**`find /sdcard` returns nothing.** `/sdcard` is a symlink to
-`/storage/self/primary`, itself a symlink to `/storage/emulated/0`, and `find`
-does not descend into a symlinked starting point. It exits successfully having
-listed one entry. The tool uses the real path.
+`sync` と `verify` は、確かめようとしたことを確かめられなかった実行を失敗として
+扱い、非ゼロで終了する。読めなかったファイルが1つでもあれば失敗。定期実行が見るの
+は終了ステータスだけなので、そこが「正常」と言ってはならない。
 
-**`find -exec stat -c ... {} +` truncates silently.** toybox aborts the batch
-with `Argument list too long` — sent to stderr, where it is usually discarded —
-and returns a partial listing with a zero exit status. It returned 3,064 of
-25,761 files. Every listing is cross-checked against a plain `find | wc -l` and
-the run aborts if the counts disagree.
+### 制約: adbサーバーと同時には使えない
 
-The two enumerations are separate commands, though, so a phone that writes a
-file between them — a thumbnail, a log line, a photo — makes them disagree
-through no fault of the listing. That is a normal thing for a phone to do and a
-poor reason to refuse a backup, so the scan is retried a few times before the
-run is refused. A difference that survives that is the truncation the check is
-there to catch.
+USBインターフェースは1プロセスしか掴めない。**adbサーバーを止めてから**使うこと。
+Android Studio や scrcpy が端末を掴んでいる間も同じ。
 
-**The `shell` service corrupts binary data.** It allocates a pseudo-terminal
-that expands LF to CRLF: a 4,869,012-byte JPEG came back as 4,876,491 bytes with
-a different SHA-1. All commands go through the `exec` service instead, which
-allocates no terminal.
+またadbdはホストが切断するとUSB機能を落として上げ直すので、インターフェースが
+Windowsから3.6秒ほど消える。続けて実行した場合はその分待つ（待っている旨を出す）。
 
-**`tar` skips files it cannot read, without failing.** This is why the transfer
-path uses `RECV`, which returns an explicit `FAIL` for the one file it could not
-read instead of quietly omitting it from a batch.
+## 仕組み
 
-**A command is a protocol message, not a process argument.** `verify` builds one
-`sha1sum` invocation out of as many paths as will fit, and the whole thing
-travels as the payload of a single `OPEN`. A device that negotiated a small
-maximum payload — adbd did until protocol v2 — answers an oversized message by
-closing the connection, which looks exactly like a broken cable. Batches are
-sized against what the device actually agreed to, and `Open` refuses anything
-larger rather than sending it.
+| 層 | パッケージ |
+| --- | --- |
+| USB | `internal/winusb` — WinUSBドライバ経由でADBインターフェースを掴み、バルク転送する |
+| プロトコル | `internal/adbproto` — CNXN/AUTH/OPEN/OKAY/WRTE/CLSE、RSA認証、ストリーム多重化 |
+| ファイル転送 | `internal/adbproto/sync.go` — `STAT_V2` / `LIST_V2` / `RECV` |
 
-**Lengths that come off the wire are not to be trusted.** The sync protocol
-announces the size of the next filename, failure message or data chunk, and the
-host then allocates or reads that much. A stream that has lost its framing turns
-four stray bytes into a demand for gigabytes, or into a data chunk long enough
-to pour the rest of the conversation into the file being saved. Each is bounded
-against what the protocol really uses.
+リバースエンジニアリングではない。AOSPの `packages/modules/adb` にある
+`protocol.txt`・`SERVICES.TXT`・`SYNC.TXT` の通りに実装している。
 
-**A reconnect reads the previous session's tail.** Data left in the USB pipes
-survives a close, so the next connection's first header lands mid-stream. Both
-pipes are reset and flushed on open, and every header's magic word is checked.
+認証はadbと同じ `~/.android/adbkey` を使うので、既にこのPCを許可済みの端末なら
+許可し直す必要はない。鍵が無ければadbと同じ形式（PKCS#8 PEM と 524バイトの
+`RSAPublicKey`）で生成するため、どちらのツールからでも使える。
 
-**Windows filenames are more restrictive than Android's.** Names containing
-`: ? * " < > |`, names ending in a dot or space, and reserved names like `CON`
-are percent-encoded. Files whose names differ only by case cannot coexist on
-NTFS, so those are skipped and reported rather than silently overwriting each
-other. A top-level device folder called `_archive` or `.quickadbackup` is
-escaped too: those are the destination's own, and a phone folder of that name
-would otherwise be written into the archive or over the index.
+ファイルの列挙は sync の `LIST` ではなく `find` 一発で済ませている。`LIST` は
+ディレクトリごとに往復するので、7,959ディレクトリで29.1秒かかった（`find` なら
+2.9秒）。
 
-**`sha1sum` may separate the digest from the path with `*`, not a space.** It
-marks binary mode, and it is not whitespace. Trimming the separator as if it were
-left the asterisk glued to the path, which then matched no file the tool had
-asked about, so every result in the batch was filed as "the device could not read
-this" - and an unreadable file used not to fail the run.
+実機で踏んだ落とし穴 — `find /sdcard` が何も返さない、`shell` サービスがバイナリ
+を壊す、`tar` が読めないファイルを黙って飛ばす、Windowsで使えない文字を含む
+ファイル名、など — への対処は、いずれも理由込みでコード中のコメントに書いてある。
 
-**`'''` is not how you escape an apostrophe for `sh`.** It leaves the string
-unterminated; the correct form closes the quoted run and reopens it, `'\''`. One
-file called `Mom's birthday.jpg` was enough to make an entire `sha1sum` batch
-unparseable.
-
-**The `exec` service carries no exit status.** A command that fails to parse is
-indistinguishable from one that succeeded with no output, which is how the
-quoting bug above stayed invisible. Every command now runs inside a compound that
-prints its own exit status, and a missing status marker is an error in itself.
-
-**A directory the shell user cannot open vanishes from the listing and from the
-count it is checked against.** The two agree, every number in the summary adds up,
-and everything underneath is missing from the backup. `find` does report it, on
-stderr, and its exit status says so; both are now acted on.
-
-**`Android/data` and `Android/obb` are excluded by default.** They are app-
-private scoped storage, unreadable to the adb shell user on Android 11+, and
-hold app caches rather than user data — 12,960 files on the test device.
-
-## Building
+## ビルド
 
 ```
 go build -o quickadbackup.exe .
 go build -ldflags "-H=windowsgui" -o quickadbackup-gui.exe ./cmd/gui
 ```
 
-`cmd/gui/rsrc.syso` embeds `app.manifest`, which the GUI cannot run without:
-walk needs Common Controls 6.0, and lacking it every widget fails at
-`TTM_ADDTOOL` and the window silently never opens. Regenerate it after editing
-the manifest:
+`cmd/gui/rsrc.syso` は `app.manifest`（Common Controls 6.0）を埋め込んだもので、
+これが無いとGUIはウィンドウすら開かない。マニフェストを変えたら作り直すこと:
 
 ```
 go run github.com/akavel/rsrc@latest -manifest cmd/gui/app.manifest -arch amd64 -o cmd/gui/rsrc.syso
 ```
 
-## One instance at a time
+## ライセンス
 
-Both binaries take a named mutex at startup and refuse to run if the other
-already holds it. Without it a second copy sat waiting 20 seconds for a device
-it was never going to get; now it says so in 50 ms.
-
-The same distinction runs deeper: `winusb.ErrInUse` (another process holds the
-interface) is not retried, while the interface briefly vanishing during adbd's
-re-enumeration is. Only one of those is worth waiting out. That sentence was
-aspirational for a while - `Open` wrapped the raw Windows errno and never the
-sentinel, so the check that acts on it could never match and a running adb server
-cost the full twenty-second retry loop every time.
-
-More than one device connected is a third case, and it is neither retried nor
-guessed at. Picking the first interface Windows enumerates makes the answer to
-"which phone did that back up" depend on enumeration order; the CLI asks for
-`-device` with enough of a path to tell them apart, and the GUI asks you to
-unplug the others.
-
-## GUI threading rules
-
-walk requires every window call on the UI thread, and operations run on
-background goroutines, so both directions need marshalling. Each rule below
-exists because breaking it produced a visible bug:
-
-- Progress arrives once per file, far faster than a window repaints. Only the
-  newest update is kept and at most one repaint is ever queued.
-- **The progress area is reset when an operation ends**, not left where it
-  stopped. A cancelled verify used to leave the bar at 71% and the label
-  reading "検証中 5170 / 7204" — a stopped operation that looked like a running
-  one.
-- **The teardown runs before any dialog.** A modal runs its own message loop,
-  so anything queued behind it waits for a click. Showing the dialog first left
-  the window advertising an operation that had already finished.
-- Dialogs raised from a worker go through `Synchronize`. A modal shown directly
-  from a worker parks that goroutine until someone clicks.
-- Settings are read on the window's `Closing` event, not after `Run` returns.
-  Reading a widget afterwards touches a destroyed HWND and hung the process
-  with no window on screen.
-- Closing the device is bounded by a timeout, so a reader parked on a USB
-  transfer cannot keep a windowless process alive.
-- **A dead connection is detected by asking it, not by reading the error.** A
-  cancelled run reports `context.Canceled` while the abort that unblocked it has
-  already killed the link; an aborted one reports `ErrAborted`. Matching on the
-  error text missed both, and left the window claiming to be connected with
-  every button enabled — the exact state the stall handling exists to avoid.
-
-### Phases with nothing to count
-
-Scanning the device takes 26 s on the test phone and reports no counts until it
-finishes, so the bar runs in marquee mode until a phase produces a real total.
-A motionless window for half a minute reads as a hang.
-
-Verifying has the same problem in its first half: hashing the local copies is
-pure disk work with no device traffic. It now reports its own progress and
-checks for cancellation — before that, pressing 中止 during it did nothing
-until the whole phase finished.
-
-## Interruption
-
-The index is written every few seconds, so an interrupted run resumes from where
-it stopped instead of starting over. Files are written to a `.part` file, flushed
-to disk and renamed, so a partial file is never mistaken for a complete one and a
-power loss cannot leave a full-length file of zeroes that the index believes is
-done. The in-progress name carries the process id and a counter, because a phone
-holding both `clip` and `clip.part` would otherwise have one worker's scratch
-file and another worker's finished name be the same path — and eight workers run
-at once. The next run sweeps away any `.part` left behind, except one whose name
-the device actually has.
-
-Cancelling is not failing. A stopped run tears the connection down after a grace
-period, so whatever was mid-transfer is reported as not retrieved; the GUI does
-not turn that into a warning that the device could not be read, because the
-device did exactly what it was told.
-
-The first Ctrl+C cancels the run so it can unwind and still print its summary; a
-second one quits immediately. Cancelling works even when the phone has stopped
-answering: a USB bulk read has no timeout of its own, so a cancellation that
-produces no progress for ten seconds tears the connection down rather than
-leaving every worker parked in the driver forever.
+MIT。[LICENSE](LICENSE) を参照。
